@@ -1,6 +1,7 @@
 package keeper
 
 import (
+	"errors"
 	"fmt"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -393,6 +394,112 @@ func (k Keeper) ExitSwapShareAmountIn(
 	return tokenOutAmount, nil
 }
 
+// func (k Keeper) ExitSwapExternAmountOut(
+// 	ctx sdk.Context,
+// 	sender sdk.AccAddress,
+// 	poolId uint64,
+// 	tokenOut sdk.Coin,
+// 	shareInMaxAmount sdk.Int,
+// ) (shareInAmount sdk.Int, err error) {
+// 	pool, err := k.GetPool(ctx, poolId)
+// 	if err != nil {
+// 		return sdk.Int{}, err
+// 	}
+
+// 	if !pool.IsActive(ctx.BlockTime()) {
+// 		return sdk.Int{}, sdkerrors.Wrapf(types.ErrPoolLocked, "exit swap on inactive pool")
+// 	}
+
+// 	PoolAsset, err := pool.GetPoolAsset(tokenOut.Denom)
+// 	if err != nil {
+// 		return sdk.Int{}, err
+// 	}
+
+// 	normalizedWeight := PoolAsset.Weight.ToDec().Quo(pool.GetTotalWeight().ToDec())
+// 	shareInAmount = calcPoolInGivenSingleOut(
+// 		PoolAsset.Token.Amount.ToDec(),
+// 		normalizedWeight,
+// 		pool.GetTotalShares().Amount.ToDec(),
+// 		tokenOut.Amount.ToDec(),
+// 		pool.GetPoolSwapFee(),
+// 		pool.GetPoolExitFee(),
+// 	).TruncateInt()
+
+// 	if shareInAmount.LTE(sdk.ZeroInt()) {
+// 		return sdk.Int{}, sdkerrors.Wrapf(types.ErrInvalidMathApprox, "token amount is zero or negative")
+// 	}
+
+// 	if shareInAmount.GT(shareInMaxAmount) {
+// 		return sdk.Int{}, sdkerrors.Wrapf(types.ErrLimitMaxAmount, "%s token is larger than max amount", PoolAsset.Token.Denom)
+// 	}
+
+// 	PoolAsset.Token.Amount = PoolAsset.Token.Amount.Sub(tokenOut.Amount)
+// 	err = pool.UpdatePoolAssetBalance(PoolAsset.Token)
+// 	if err != nil {
+// 		return sdk.Int{}, err
+// 	}
+
+// 	exitFee := pool.GetPoolExitFee().MulInt(shareInAmount).TruncateInt()
+// 	shareInAmountAfterExitFee := shareInAmount.Sub(exitFee)
+
+// 	err = k.bankKeeper.SendCoins(ctx, pool.GetAddress(), sender, sdk.Coins{
+// 		tokenOut,
+// 	})
+// 	if err != nil {
+// 		return sdk.Int{}, err
+// 	}
+
+// 	// TODO: `balancer` contract sends the exit fee to the `factory` contract.
+// 	//       But, it is unclear that how the exit fees in the `factory` contract are handled.
+// 	//       And, it seems to be not good way to send the exit fee to the pool,
+// 	//       because the pool doesn't have the PoolAsset about exit fee.
+// 	//       So, temporarily, just burn the exit fee.
+// 	if exitFee.IsPositive() {
+// 		err = k.BurnPoolShareFromAccount(ctx, pool, sender, exitFee)
+// 		if err != nil {
+// 			return sdk.Int{}, err
+// 		}
+// 	}
+
+// 	err = k.BurnPoolShareFromAccount(ctx, pool, sender, shareInAmountAfterExitFee)
+// 	if err != nil {
+// 		return sdk.Int{}, err
+// 	}
+
+// 	err = k.SetPool(ctx, pool)
+// 	if err != nil {
+// 		return sdk.Int{}, err
+// 	}
+
+// 	removedCoins := sdk.Coins{tokenOut}
+// 	k.createRemoveLiquidityEvent(ctx, sender, pool.GetId(), removedCoins)
+// 	k.hooks.AfterExitPool(ctx, sender, pool.GetId(), shareInAmount, removedCoins)
+// 	k.RecordTotalLiquidityDecrease(ctx, removedCoins)
+
+// 	return shareInAmount, nil
+// }
+
+// // pAi
+// func calcPoolInGivenSingleOut(
+// 	tokenBalanceOut,
+// 	normalizedTokenWeightOut,
+// 	poolSupply,
+// 	tokenAmountOut,
+// 	swapFee sdk.Dec,
+// 	exitFee sdk.Dec,
+// ) sdk.Dec {
+// 	tokenAmountOutBeforeFee := tokenAmountOut.Quo(feeRatio(normalizedTokenWeightOut, swapFee))
+
+// 	// delta poolSupply is positive(total pool shares decreases)
+// 	// pool weight is always 1
+// 	poolAmountIn := solveConstantFunctionInvariant(tokenBalanceOut.Sub(tokenAmountOutBeforeFee), tokenBalanceOut, normalizedTokenWeightOut, poolSupply, sdk.OneDec())
+
+// 	// charge exit fee on the pool token side
+// 	// pAi = pAiAfterExitFee/(1-exitFee)
+// 	poolAmountInBeforeFee := poolAmountIn.Quo(sdk.OneDec().Sub(exitFee))
+// 	return poolAmountInBeforeFee
+// }
+
 func (k Keeper) ExitSwapExternAmountOut(
 	ctx sdk.Context,
 	sender sdk.AccAddress,
@@ -400,13 +507,38 @@ func (k Keeper) ExitSwapExternAmountOut(
 	tokenOut sdk.Coin,
 	shareInMaxAmount sdk.Int,
 ) (shareInAmount sdk.Int, err error) {
-	// Basically what we have to do is:
-	// estimate how many LP shares this would take to do.
-	// We do so by calculating how much a swap of half of tokenOut to TokenIn would be.
-	// Then we calculate how many LP shares that'd be worth.
-	// We should have code for that once we implement JoinPoolNoSwap.
-	// Then check if the number of shares is LTE to shareInMaxAmount.
-	// if so, use the needed number of shares, do exit pool, and the swap.
+	pool, err := k.GetPool(ctx, poolId)
+	if err != nil {
+		return sdk.Int{}, err
+	}
+
+	extendedPool, ok :=  pool.(types.PoolExternExitSwapExternAmountOutExtension)
+	if !ok {
+		return sdk.Int{}, fmt.Errorf("pool with id %d does not support this kind of exit", poolId)
+	}
+
+	shareInAmount, err = extendedPool.ExitSwapExternAmountOut(ctx, tokenOut, shareInMaxAmount)
+	
+	k.ExitSwapShareAmountIn(ctx, sender, poolId, tokenOut.Denom, shareInAmount, tokenOut.Amount)
+
+	// PoolAsset, err := pool.GetPoolAsset(tokenOut.Denom)
+	// if err != nil {
+	// 	return sdk.Int{}, err
+	// }
+
+	// normalizedWeight := PoolAsset.Weight.ToDec().Quo(pool.GetTotalWeight().ToDec())
+	// shareInAmount = calcPoolInGivenSingleOut(
+	// 	PoolAsset.Token.Amount.ToDec(),
+	// 	normalizedWeight,
+	// 	pool.GetTotalShares().Amount.ToDec(),
+	// 	tokenOut.Amount.ToDec(),
+	// 	pool.GetPoolSwapFee(),
+	// 	pool.GetPoolExitFee(),
+	// ).TruncateInt()
+
+	k.ExitSwapShareAmountIn(ctx, )
+
+
 
 	panic("To implement later")
 }

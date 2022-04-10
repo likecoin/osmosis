@@ -375,3 +375,81 @@ func (p *Pool) CalcExitPoolShares(ctx sdk.Context, exitingShares sdk.Int, exitFe
 	}
 	return exitedCoins, nil
 }
+
+// pAi
+func calcPoolInGivenSingleOut(
+	tokenBalanceOut,
+	normalizedTokenWeightOut,
+	poolSupply,
+	tokenAmountOut,
+	swapFee sdk.Dec,
+	exitFee sdk.Dec,
+) sdk.Dec {
+	tokenAmountOutBeforeFee := tokenAmountOut.Quo(feeRatio(normalizedTokenWeightOut, swapFee))
+
+	// delta poolSupply is positive(total pool shares decreases)
+	// pool weight is always 1
+	poolAmountIn := solveConstantFunctionInvariant(tokenBalanceOut.Sub(tokenAmountOutBeforeFee), tokenBalanceOut, normalizedTokenWeightOut, poolSupply, sdk.OneDec())
+
+	// charge exit fee on the pool token side
+	// pAi = pAiAfterExitFee/(1-exitFee)
+	poolAmountInBeforeFee := poolAmountIn.Quo(sdk.OneDec().Sub(exitFee))
+	return poolAmountInBeforeFee
+}
+
+func feeRatio(
+	normalizedWeight,
+	swapFee sdk.Dec,
+) sdk.Dec {
+	zar := (sdk.OneDec().Sub(normalizedWeight)).Mul(swapFee)
+	return sdk.OneDec().Sub(zar)
+}
+
+func (p *Pool) ExitSwapExternAmountOut(
+	ctx sdk.Context,
+	tokenOut sdk.Coin,
+	shareInMaxAmount sdk.Int,
+) (shareInAmount sdk.Int, err error) {
+
+	_, pAsset, err := p.getPoolAssetAndIndex(tokenOut.Denom)
+	if err != nil {
+		return sdk.Int{}, err
+	}
+
+	normalizedTokenWeightOut := pAsset.Weight.ToDec().Quo(p.TotalWeight.ToDec())
+
+	tokenAmountOut := tokenOut.Amount.ToDec()
+
+	
+
+	tokenAmountOutBeforeFee := tokenAmountOut.Quo(feeRatio(normalizedTokenWeightOut, p.GetSwapFee(ctx)))
+
+	tokenBalanceOut := pAsset.Token.Amount.ToDec()
+
+	poolSupply := p.GetTotalShares().ToDec()
+
+	// delta poolSupply is positive(total pool shares decreases)
+	// pool weight is always 1
+	poolAmountIn := solveConstantFunctionInvariant(tokenBalanceOut.Sub(tokenAmountOutBeforeFee), tokenBalanceOut, normalizedTokenWeightOut, poolSupply, sdk.OneDec())
+
+
+	// charge exit fee on the pool token side
+	// pAi = pAiAfterExitFee/(1-exitFee)
+	poolAmountInBeforeFee := poolAmountIn.Quo(sdk.OneDec().Sub(p.GetExitFee(ctx)))
+
+	if poolAmountInBeforeFee.LTE(sdk.ZeroInt().ToDec()) {
+		return sdk.Int{}, sdkerrors.Wrapf(types.ErrInvalidMathApprox, "token amount is zero or negative")
+	}
+
+	if poolAmountInBeforeFee.GT(shareInMaxAmount.ToDec()) {
+		return sdk.Int{}, sdkerrors.Wrapf(types.ErrLimitMaxAmount, "%s token is larger than max amount", pAsset.Token.Denom)
+	}
+
+	pAsset.Token.Amount = pAsset.Token.Amount.Sub(tokenOut.Amount)
+	err = p.UpdatePoolAssetBalance(pAsset.Token)
+	if err != nil {
+		return sdk.Int{}, err
+	}
+
+	return sdk.Int(poolAmountInBeforeFee), nil
+}

@@ -67,6 +67,15 @@ type PoolI interface {
 	CalcExitPoolShares(ctx sdk.Context, numShares sdk.Int, exitFee sdk.Dec) (exitedCoins sdk.Coins, err error)
 }
 
+type PoolExternExitSwapExternAmountOutExtension interface {
+	PoolI
+	ExitSwapExternAmountOut(
+		ctx sdk.Context,
+		tokenOut sdk.Coin,
+		shareInMaxAmount sdk.Int,
+	) (shareInAmount sdk.Int, err error)
+}
+
 func NewPoolAddress(poolId uint64) sdk.AccAddress {
 	key := append([]byte("pool"), sdk.Uint64ToBigEndian(poolId)...)
 	return address.Module(ModuleName, key)
